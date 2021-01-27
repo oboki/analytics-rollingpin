@@ -6,6 +6,7 @@ from airflow.exceptions import AirflowSkipException
 from airflow.utils.trigger_rule import TriggerRule
 
 import json
+import logging
 from datetime import datetime, timedelta
 from pendulum import timezone
 from contextlib import closing
@@ -13,18 +14,8 @@ from dateutil.relativedelta import relativedelta
 from croniter import croniter
 from time import sleep
 
-#execution_date = datetime.now()
-#execution_date = datetime.strptime('2020-12-30', '%Y-%m-%d')
-#execution_date = datetime.strptime('2020-12-31', '%Y-%m-%d')
-#execution_date = datetime.strptime('2021-01-01', '%Y-%m-%d')
-#execution_date = datetime.strptime('2021-01-02', '%Y-%m-%d')
-#execution_date = datetime.strptime('2021-01-03', '%Y-%m-%d')
-#execution_date = datetime.strptime('2021-01-04', '%Y-%m-%d')
-
 SLEEP_INTERVAL = 30
-
-jobs_todo_today:list = None
-execution_date:datetime = datetime.now()
+jobs_todo_today: list = None
 
 args = {
     'owner': 'analytics',
@@ -43,7 +34,14 @@ def is_holiday(date: datetime) -> bool: # util
         '2021-01-01',
         '2021-01-02',
         '2021-01-03',
-        '2021-01-09'
+        '2021-01-09',
+        '2021-01-10',
+        '2021-01-16',
+        '2021-01-17',
+        '2021-01-23',
+        '2021-01-24',
+        '2021-01-30',
+        '2021-01-31' 
     ]
 
     date = datetime.strftime(date, '%Y-%m-%d')
@@ -55,10 +53,10 @@ def is_holiday(date: datetime) -> bool: # util
 
 
 def _prepare_downstreams(date: datetime,
-                        interval: str,
-                        delay: int,
-                        execution_date: datetime
-                       ) -> list:
+                         interval: str,
+                         delay: int,
+                         execution_date: datetime
+                        ) -> list:
     dates = []
     while date < execution_date:
         if interval == '@by-last-day-of-month':
@@ -79,7 +77,7 @@ def _prepare_downstreams(date: datetime,
     return dates
 
 
-def _make_job_pairs_to_query(jobs):
+def _make_job_pairs_to_query(jobs, execution_date):
     upstream_pairs = []
     for job in jobs:
         schedule_delay = job['schedule_delay'] if 'schedule_delay' in job else 0
@@ -100,7 +98,6 @@ def _make_job_pairs_to_query(jobs):
 
 
 def _prepare_jobs_todo():
-    #jobs = json.load(open('exported_variables.json', 'rt'))['jobs']
     job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
     execution_date = datetime.strptime(job_schedule_info['last_execution_date'],'%Y-%m-%d') + timedelta(days=1)
 
@@ -111,7 +108,6 @@ def _prepare_jobs_todo():
             job['schedule_interval'],
             job['schedule_delay'] if 'schedule_delay' in job else 0,
             execution_date
-            
         )
 
         if len(downstreams) == 0:
@@ -130,11 +126,9 @@ def _prepare_jobs_todo():
 def monitor_upstreams(**kwargs):
     jobs_todo_today = kwargs['jobs_todo_today']
     kwargs['ti'].xcom_push(key='jobs_todo_today', value=jobs_todo_today)
-    print(execution_date)
-    print(jobs_todo_today)
 
     while True:
-        pairs = _make_job_pairs_to_query(jobs_todo_today)
+        pairs = _make_job_pairs_to_query(jobs_todo_today, kwargs['execution_date'])
 
         if len(pairs) == 0:
             break
@@ -144,14 +138,12 @@ def monitor_upstreams(**kwargs):
             with closing(conn.cursor()) as cur:
                 for p in pairs:
                     sql = """
-                    select date_format(end_date, '%Y-%m-%dT%H:%i:%S')
-                      from task_instance
+                    select date_format(end_date,'%Y-%m-%dT%H:%i:%S') from dag_run
                      where execution_date >= str_to_date('{base_dt}','%Y%m%d')
                        and execution_date <  date_add(str_to_date('{base_dt}','%Y%m%d'), interval 1 day)
-                       and dag_id = '{dag_id}'
-                       and state = 'success'
+                       and dag_id = '{dag_id}' and state = 'success'
                     """.format(dag_id=p['btch_id'],base_dt=p['base_dt'])
-                    print(sql)
+                    logging.info(sql)
                     cur.execute(sql)
                     rs = cur.fetchall()
 
@@ -183,7 +175,7 @@ def determine_to_run(**kwargs):
 
         for job in jobs:
             if job['id'] == kwargs['job_id']:
-                print(job['upstreams'])
+                logging.info(job['upstreams'])
                 for i in range(len(job['upstreams'])):
                     if job['upstreams'][i]['finished_at'] == None:
                         break
@@ -213,15 +205,15 @@ def finalize_dag(**kwargs):
     Variable.set('job-schedule-info', json.dumps(job_schedule_info))
 
 
-job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
-execution_date = datetime.strptime(job_schedule_info['last_execution_date']+"-+0900",'%Y-%m-%d-%z') + timedelta(days=1)
-print(execution_date)
-
-jobs_todo_today = _prepare_jobs_todo()
-
 def raise_skip():
     raise AirflowSkipException
 
+
+#deploy job-schedule-info
+#deploy_job_schedule_info()
+
+job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
+execution_date = datetime.strptime(job_schedule_info['last_execution_date']+"-+0900",'%Y-%m-%d-%z') + timedelta(days=1)
 
 with DAG(
     'job_trigger',
@@ -232,6 +224,8 @@ with DAG(
     default_args=args,
     tags=['datamart']
 ) as dag:
+
+    jobs_todo_today = _prepare_jobs_todo()
 
     TASK_TO_MONITOR_UPSTREAMS = PythonOperator(
         task_id='monitor_upstreams',
@@ -251,14 +245,8 @@ with DAG(
 
     TASK_TO_MONITOR_UPSTREAMS >> TASK_TO_FINALIZE
 
-    #for job in jobs_todo_today:
     for job in job_schedule_info['jobs']:
-
-        todo = False
-        for j in jobs_todo_today:
-            if job['id'] == j['id']:
-                todo = True
-                break
+        todo = job['id'] in [j['id'] for j in jobs_todo_today]
 
         TASK_TO_DETERMINE_TO_RUN = PythonOperator(
             task_id='determine_to_run_{}'.format(job['id']),
@@ -269,22 +257,22 @@ with DAG(
         )
 
         if todo:
-            for j in jobs_todo_today:
-                if job['id'] == j['id']:
-                    for i in range(len(j['downstreams'])):
-                        TASK_TO_TRIGGER_DAGRUN = TriggerDagRunOperator(
-                            task_id='trigger_dagrun_{target}_{number}'.format(target=job['id'],number=str(i+1)),
-                            trigger_dag_id=j['id'],
-                            execution_date=datetime.strptime(j['downstreams'][i],'%Y-%m-%d'),
-                            dag=dag
-                        )
+            downstreams = [j['downstreams'] for j in jobs_todo_today if j['id'] == job['id']][0]
 
-                        TASK_TO_DETERMINE_TO_RUN >> TASK_TO_TRIGGER_DAGRUN
-                        TASK_TO_TRIGGER_DAGRUN >> TASK_TO_FINALIZE
+            for i in range(len(downstreams)):
+                TASK_TO_TRIGGER_DAGRUN = TriggerDagRunOperator(
+                    task_id='trigger_dagrun_{}_{}'.format(job['id'],str(i+1)),
+                    trigger_dag_id=job['id'],
+                    execution_date=datetime.strptime(downstreams[i],'%Y-%m-%d'),
+                    dag=dag
+                )
+
+                TASK_TO_DETERMINE_TO_RUN >> TASK_TO_TRIGGER_DAGRUN
+                TASK_TO_TRIGGER_DAGRUN >> TASK_TO_FINALIZE
 
         else:
             TASK_TO_TRIGGER_DAGRUN = PythonOperator(
-                task_id='trigger_dagrun_{target}_{number}'.format(target=job['id'],number='1'),
+                task_id='trigger_dagrun_{}_{}'.format(job['id'],'1'),
                 python_callable=raise_skip,
                 dag=dag
             )
