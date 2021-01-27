@@ -51,63 +51,61 @@
             }
         ]
     },
-    "job-schedule-info-deploy": {
-        "jobs": [
-            {
-                "id": "crm_d_0000",
-                "schedule_interval": "@daily",
-                "upstreams": [
-                    {
-                        "id": "edw_d_0001"
-                    }
-                ]
-            },
-            {
-                "id": "crm_d_0001",
-                "schedule_interval": "@daily",
-                "upstreams": [
-                    {
-                        "id": "edw_d_0001"
-                    },
-                    {
-                        "id": "edw_d_0003"
-                    }
-                ]
-            },
-            {
-                "id": "crm_d_0023",
-                "schedule_interval": "@by-day-before-a-business-day",
-                "upstreams": [
-                    {
-                        "id": "edw_d_0197"
-                    },
-                    {
-                        "id": "edw_d_0199"
-                    }
-                ]
-            },
-            {
-                "id": "crm_m_0001",
-                "schedule_interval": "@by-last-day-of-month",
-                "upstreams": [
-                    {
-                        "id": "crm_d_0001"
-                    }
-                ]
-            },
-            {
-                "id": "crm_m_0004",
-                "schedule_interval": "@by-last-day-of-month",
-                "schedule_delay": 86400,
-                "upstreams": [
-                    {
-                        "id": "edw_d_0037"
-                    },
-                    {
-                        "id": "crm_d_0004"
-                    }
-                ]
-            }
-        ]
-    }
+    "jobs-to-deploy": [
+        {
+            "id": "crm_d_0000",
+            "schedule_interval": "@daily",
+            "upstreams": [
+                {
+                    "id": "edw_d_0001"
+                }
+            ]
+        },
+        {
+            "id": "crm_d_0001",
+            "schedule_interval": "@daily",
+            "upstreams": [
+                {
+                    "id": "edw_d_0001"
+                },
+                {
+                    "id": "edw_d_0003"
+                }
+            ]
+        },
+        {
+            "id": "crm_d_0023",
+            "schedule_interval": "@by-day-before-a-business-day",
+            "upstreams": [
+                {
+                    "id": "edw_d_0197"
+                },
+                {
+                    "id": "edw_d_0199"
+                }
+            ]
+        },
+        {
+            "id": "crm_m_0001",
+            "schedule_interval": "@by-last-day-of-month",
+            "upstreams": [
+                {
+                    "id": "crm_d_0001"
+                }
+            ]
+        },
+        {
+            "id": "crm_m_0004",
+            "schedule_interval": "@by-last-day-of-month",
+            "schedule_delay": 86400,
+            "upstreams": [
+                {
+                    "id": "edw_d_0037"
+                },
+                {
+                    "id": "crm_d_0004"
+                }
+            ]
+        }
+    ]
 }

@@ -14,13 +14,13 @@ from dateutil.relativedelta import relativedelta
 from croniter import croniter
 from time import sleep
 
-SLEEP_INTERVAL = 30
+SLEEP_INTERVAL = 10
 jobs_todo_today: list = None
 
 args = {
     'owner': 'analytics',
     'depends_on_past': False,
-    'start_date': datetime(2020, 12, 31, tzinfo=timezone('Asia/Seoul')),
+    'start_date': datetime(2021, 1, 1, tzinfo=timezone('Asia/Seoul')),
     'on_failure_callback': None,
     'provide_context': True,
 }
@@ -133,25 +133,29 @@ def monitor_upstreams(**kwargs):
         if len(pairs) == 0:
             break
 
-        hook = MySqlHook(mysql_conn_id='airflow_db')
-        with closing(hook.get_conn()) as conn:
-            with closing(conn.cursor()) as cur:
-                for p in pairs:
-                    sql = """
-                    select date_format(end_date,'%Y-%m-%dT%H:%i:%S') from dag_run
-                     where execution_date >= str_to_date('{base_dt}','%Y%m%d')
-                       and execution_date <  date_add(str_to_date('{base_dt}','%Y%m%d'), interval 1 day)
-                       and dag_id = '{dag_id}' and state = 'success'
-                    """.format(dag_id=p['btch_id'],base_dt=p['base_dt'])
-                    logging.info(sql)
-                    cur.execute(sql)
-                    rs = cur.fetchall()
+        def retrieve_dag_run_info(mysql_conn_id):
+            hook = MySqlHook(mysql_conn_id='airflow_db')
+            with closing(hook.get_conn()) as conn:
+                with closing(conn.cursor()) as cur:
+                    for p in pairs:
+                        sql = """
+                        select date_format(end_date,'%Y-%m-%dT%H:%i:%S') from dag_run
+                         where execution_date >= str_to_date('{base_dt}','%Y%m%d')
+                           and execution_date <  date_add(str_to_date('{base_dt}','%Y%m%d'), interval 1 day)
+                           and dag_id = '{dag_id}' and state = 'success'\
+                        """.format(dag_id=p['btch_id'],base_dt=p['base_dt'])
+                        logging.info(sql)
+                        cur.execute(sql)
+                        rs = cur.fetchall()
 
-                    if len(rs) > 0 :
-                        for job in jobs_todo_today:
-                            for upstream in job['upstreams']:
-                                if upstream['id'] == p['btch_id']:
-                                    upstream.update({'finished_at': rs[0][0]})
+                        if len(rs) > 0 :
+                            for job in jobs_todo_today:
+                                for upstream in job['upstreams']:
+                                    if upstream['id'] == p['btch_id']:
+                                        upstream.update({'finished_at': rs[0][0]})
+
+        retrieve_dag_run_info('airflow_db')
+        retrieve_dag_run_info('bdp_airflow_db')
 
         kwargs['ti'].xcom_push(key='jobs_todo_today', value=jobs_todo_today)
         sleep(SLEEP_INTERVAL)
@@ -209,11 +213,26 @@ def raise_skip():
     raise AirflowSkipException
 
 
-#deploy job-schedule-info
-#deploy_job_schedule_info()
+def deploy_job_schedule_info():
+    job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
 
-job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
-execution_date = datetime.strptime(job_schedule_info['last_execution_date']+"-+0900",'%Y-%m-%d-%z') + timedelta(days=1)
+    jobs_in_production = job_schedule_info['jobs']
+    jobs_to_deploy = Variable.get('jobs-to-deploy', deserialize_json=True)
+
+    for d in jobs_to_deploy:
+        already_exists = False
+        for p in jobs_in_production:
+            if d['id'] == p['id']:
+                d.update({'last_execution_date': p['last_execution_date']})
+                already_exists = True
+        
+        if not already_exists:
+            if not 'last_execution_date' in d:
+                d.update({'last_execution_date': job_schedule_info['last_execution_date']})
+
+    job_schedule_info.update({'jobs': jobs_to_deploy})
+    Variable.set('job-schedule-info', json.dumps(job_schedule_info))
+
 
 with DAG(
     'job_trigger',
@@ -224,6 +243,11 @@ with DAG(
     default_args=args,
     tags=['datamart']
 ) as dag:
+
+    deploy_job_schedule_info()
+    job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
+
+    execution_date = datetime.strptime(job_schedule_info['last_execution_date']+"-+0900",'%Y-%m-%d-%z') + timedelta(days=1)
 
     jobs_todo_today = _prepare_jobs_todo()
 
