@@ -26,9 +26,10 @@ args = {
 }
 
 """
-return if the date is holiday
+해당 datetime 이 휴일인지 여부를 반환
+common 에 옮겨둘 지?
 """
-def is_holiday(date: datetime) -> bool: # util
+def _is_holiday(date: datetime) -> bool: # util
     holidays = [
         '2020-12-27',
         '2021-01-01',
@@ -45,13 +46,24 @@ def is_holiday(date: datetime) -> bool: # util
     ]
 
     date = datetime.strftime(date, '%Y-%m-%d')
-    for h in holidays:
-        if h == date:
-            return True
 
-    return False
+    return date in holidays
+    # for h in holidays:
+    #     if h == date:
+    #         return True
+
+    # return False
 
 
+"""
+해당 파이프라인이 기준 일자에 처리해야하는 기준일자들을 반환
+
+* interval: 스케줄 정보에서 정의한 
+* last_execution_date: 해당 파이프라인이 가장 마지막으로 작업 된 일자
+* execution_date: 기준일자
+
+예를들어 영업일 전일 작업(@by-day-before-a-business-day)의 경우 월요일에 금,토,일 작업 세 개를 수행해야 함
+"""
 def _prepare_downstreams(date: datetime,
                          interval: str,
                          delay: int,
@@ -61,6 +73,9 @@ def _prepare_downstreams(date: datetime,
     while date < execution_date:
         if interval == '@by-last-day-of-month':
             date = date.replace(day=1) + relativedelta(months=2) - timedelta(days=1)
+        elif interval == '@every-monday':
+            pass
+        # TODO: cronexp-based calculation
         else:
             date = date + timedelta(days=1)
 
@@ -71,12 +86,16 @@ def _prepare_downstreams(date: datetime,
         return []
 
     if interval == '@by-day-before-a-business-day':
-        if is_holiday(max(dates) + timedelta(days=1)):
+        if _is_holiday(max(dates) + timedelta(days=1)):
             return []
 
     return dates
 
 
+"""
+선행작업 쌍을 만들어서 반환
+일자 및 주기가 다른 선행작업을 조회해야하는 경우가 있음
+"""
 def _make_job_pairs_to_query(jobs, execution_date):
     upstream_pairs = []
     for job in jobs:
@@ -97,6 +116,9 @@ def _make_job_pairs_to_query(jobs, execution_date):
     return result
 
 
+"""
+해당 기준일자에 처리해야될 작업리스트 반환
+"""
 def _prepare_jobs_todo():
     job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
     execution_date = datetime.strptime(job_schedule_info['last_execution_date'],'%Y-%m-%d') + timedelta(days=1)
@@ -123,6 +145,37 @@ def _prepare_jobs_todo():
     return todo
 
 
+"""
+tree 화면에서 해당 기준일자에 수행되지 않을 작업도 시각화 하기 위해 사용
+해당일자에 작업 대상이 아닌 경우 if not todo, python_callable=_raise_skip
+"""
+def _raise_skip():
+    raise AirflowSkipException
+
+
+"""
+"""
+def _deploy_job_schedule_info():
+    job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
+
+    jobs_in_production = job_schedule_info['jobs']
+    jobs_to_deploy = Variable.get('jobs-to-deploy', deserialize_json=True)
+
+    for d in jobs_to_deploy:
+        already_exists = False
+        for p in jobs_in_production:
+            if d['id'] == p['id']:
+                d.update({'last_execution_date': p['last_execution_date']})
+                already_exists = True
+        
+        if not already_exists:
+            if not 'last_execution_date' in d:
+                d.update({'last_execution_date': job_schedule_info['last_execution_date']})
+
+    job_schedule_info.update({'jobs': jobs_to_deploy})
+    Variable.set('job-schedule-info', json.dumps(job_schedule_info))
+
+
 def monitor_upstreams(**kwargs):
     jobs_todo_today = kwargs['jobs_todo_today']
     kwargs['ti'].xcom_push(key='jobs_todo_today', value=jobs_todo_today)
@@ -133,7 +186,7 @@ def monitor_upstreams(**kwargs):
         if len(pairs) == 0:
             break
 
-        def retrieve_dag_run_info(mysql_conn_id):
+        def _retrieve_dag_run_info(mysql_conn_id):
             hook = MySqlHook(mysql_conn_id='airflow_db')
             with closing(hook.get_conn()) as conn:
                 with closing(conn.cursor()) as cur:
@@ -154,13 +207,15 @@ def monitor_upstreams(**kwargs):
                                     if upstream['id'] == p['btch_id']:
                                         upstream.update({'finished_at': rs[0][0]})
 
-        retrieve_dag_run_info('airflow_db')
-        retrieve_dag_run_info('bdp_airflow_db')
+        _retrieve_dag_run_info('airflow_db')
+        _retrieve_dag_run_info('bdp_airflow_db')
 
         kwargs['ti'].xcom_push(key='jobs_todo_today', value=jobs_todo_today)
         sleep(SLEEP_INTERVAL)
 
 
+"""
+"""
 def determine_to_run(**kwargs):
     if kwargs['todo'] == False:
         raise AirflowSkipException
@@ -169,6 +224,11 @@ def determine_to_run(**kwargs):
 
     while not runnable:
         while True:
+            """
+            monitor_upstreams 와 같은 레벨에서 initiate 되는데,
+            타이밍이슈로 해당 xcom 생성이 안 되어있을 수가 있음
+            이 경우 retry 처리.
+            """
             try:
                 jobs = kwargs['ti'].xcom_pull(
                     key='jobs_todo_today', task_ids='monitor_upstreams')
@@ -191,6 +251,8 @@ def determine_to_run(**kwargs):
     # process before to trigger
 
 
+"""
+"""
 def finalize_dag(**kwargs):
     job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
     last_execution_date = datetime.strftime(datetime.strptime(job_schedule_info['last_execution_date'], '%Y-%m-%d') + timedelta(days=1),'%Y-%m-%d')
@@ -209,31 +271,6 @@ def finalize_dag(**kwargs):
     Variable.set('job-schedule-info', json.dumps(job_schedule_info))
 
 
-def raise_skip():
-    raise AirflowSkipException
-
-
-def deploy_job_schedule_info():
-    job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
-
-    jobs_in_production = job_schedule_info['jobs']
-    jobs_to_deploy = Variable.get('jobs-to-deploy', deserialize_json=True)
-
-    for d in jobs_to_deploy:
-        already_exists = False
-        for p in jobs_in_production:
-            if d['id'] == p['id']:
-                d.update({'last_execution_date': p['last_execution_date']})
-                already_exists = True
-        
-        if not already_exists:
-            if not 'last_execution_date' in d:
-                d.update({'last_execution_date': job_schedule_info['last_execution_date']})
-
-    job_schedule_info.update({'jobs': jobs_to_deploy})
-    Variable.set('job-schedule-info', json.dumps(job_schedule_info))
-
-
 with DAG(
     'job_trigger',
     description='monitor upstreams and trigger jobs',
@@ -244,7 +281,7 @@ with DAG(
     tags=['datamart']
 ) as dag:
 
-    deploy_job_schedule_info()
+    _deploy_job_schedule_info()
     job_schedule_info = Variable.get('job-schedule-info', deserialize_json=True)
 
     execution_date = datetime.strptime(job_schedule_info['last_execution_date']+"-+0900",'%Y-%m-%d-%z') + timedelta(days=1)
@@ -297,7 +334,7 @@ with DAG(
         else:
             TASK_TO_TRIGGER_DAGRUN = PythonOperator(
                 task_id='trigger_dagrun_{}_{}'.format(job['id'],'1'),
-                python_callable=raise_skip,
+                python_callable=_raise_skip,
                 dag=dag
             )
 

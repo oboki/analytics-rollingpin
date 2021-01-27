@@ -66,10 +66,7 @@
             "schedule_interval": "@daily",
             "upstreams": [
                 {
-                    "id": "edw_d_0001"
-                },
-                {
-                    "id": "edw_d_0003"
+                    "id": "drm_d_0000"
                 }
             ]
         },
